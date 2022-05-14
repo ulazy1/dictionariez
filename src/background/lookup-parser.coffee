@@ -47,6 +47,9 @@ class LookupParser
         if utils.isEnglish(w) and setting.getValue "enableLookupEnglish"
             return setting.getValue "englishLookupSource" # google, bing, wiktionary
 
+        if utils.hasKorean(w) and setting.getValue "enableLookupKorean"
+            return setting.getValue "koreanLookupSource" # google, wiktionary, naver (korean only)
+
         for name, dictDesc of @data
             if dictDesc.supportChinese
                 return name if utils.isChinese(w) and setting.getValue "enableLookupChinese"
@@ -81,6 +84,16 @@ class LookupParser
             return $(html, virtualDom)
         )
 
+    loadJson: (url, credentials) ->
+        utils.promiseInTime(fetch(url, {
+            method: 'GET', 
+            credentials
+        }), 5000)
+        .then((resp) -> 
+            throw new Error(resp.status) if not resp.ok
+            return resp.json()
+        )
+
     parse: (w, tname, prevResult) ->
         tname ?= @checkType(w)
         return unless tname 
@@ -94,7 +107,10 @@ class LookupParser
                 url = url.replace 'hl=en-US', 'hl='+setting.getValue('otherLang')
 
         try
-            html = await @load url, dictDesc.credentials
+            if tname == "naver"
+                json = await @loadJson url, dictDesc.credentials
+            else
+                html = await @load url, dictDesc.credentials
         catch err 
             if (err.statusText or err.message) == 'timeout' \
             and tname != 'wiktionary' \
@@ -103,7 +119,10 @@ class LookupParser
             console.error "Failed to parse: ", url, err 
             return  
 
-        result = @parseResult html, dictDesc.result
+        if tname == "naver"
+            result = @parseNaver json, dictDesc.result
+        else
+            result = @parseResult html, dictDesc.result
 
         # special handle of bing when look up Chinese
         if tname == "bing"
@@ -122,6 +141,10 @@ class LookupParser
                 setEnglishProns(result)
                 if not setting.getValue "enableLookupEnglish"
                     result = null 
+
+            else if result.langSymbol == 'ko'
+                if not setting.getValue "enableLookupKorean"
+                    result = null
 
             else if result.langSymbol
                 for lang, n of langs 
@@ -146,6 +169,8 @@ class LookupParser
                     if targetLang.lang in setting.getValue("otherDisabledLanguages") or not langs[targetLang.lang]
                         targetLang = null 
                     else if targetLang.lang == 'English' and not setting.getValue "enableLookupEnglish"
+                        targetLang = null
+                    else if targetLang.lang == 'Korean' and not setting.getValue "enableLookupKorean"
                         targetLang = null
                     else 
                         if targetLang.lang == 'English'
@@ -191,6 +216,37 @@ class LookupParser
             result.defs2 = wiktionaryResult.defs 
         
         return result 
+
+    parseNaver: (json, obj) ->
+        result = {}
+        definitions = json.searchResultMap.searchResultListMap.WORD.items
+
+        result['langSymbol'] = 'ko'
+        result['defs'] = []
+
+        for explanation in definitions
+            newDef = {}
+            entry = explanation.expEntry.replace(/(<([^>]+)>)/gi, "")
+            meansCollector = explanation.meansCollector[0]
+
+            newDef['def'] = []
+
+            count = 1
+            for def in meansCollector.means
+                pretty_value = def.value.replace(/(<([^>]+)>)/gi, "")
+
+                if meansCollector.means.length != 1
+                    pretty_value = count.toString() + ". " + def.value.replace(/(<([^>]+)>)/gi, "")
+
+                if count == 1
+                    pretty_value = entry + ": " + pretty_value
+
+                count += 1
+                newDef['def'].push pretty_value
+
+            result['defs'].push newDef
+
+        return result
 
 
     parseResult: ($el, obj) ->
@@ -313,6 +369,7 @@ test = () ->
     # parser.parse('請う').then console.log 
     # parser.parse('あなた').then console.log 
     # parser.parse('장소').then console.log 
+    # parser.parse('배').then console.log # this example is here because 배 has a lot of different definitions
     # parser.parse('бештар').then console.log 
     # parser.parse('бо').then console.log 
     # parser.parse('ไทย').then console.log 
